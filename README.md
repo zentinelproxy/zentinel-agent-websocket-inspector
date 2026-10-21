@@ -1,65 +1,109 @@
-# zentinel-agent-websocket-inspector
+<p align="center">
+  <a href="https://zentinelproxy.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
+      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+    </picture>
+  </a>
+</p>
 
-A WebSocket inspection agent for the Zentinel proxy. Provides security controls for WebSocket traffic including content filtering, schema validation, rate limiting, and size limits.
+<h3 align="center">WebSocket inspector agent</h3>
 
-> **Note:** Inspection operates on individual WebSocket frames. Fragmented messages are not reassembled before inspection, which means payloads split across multiple frames may bypass detection patterns.
+<p align="center">Inspects WebSocket frames after the upgrade for XSS, SQL injection and command injection patterns, schema violations, size and rate limits.</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/zentinelproxy/zentinel-agent-websocket-inspector/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/zentinelproxy/zentinel-agent-websocket-inspector/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-9b4d8a?style=flat&labelColor=1f161e">
+  <img alt="Agent protocol: v2" src="https://img.shields.io/badge/agent%20protocol-v2-f68d31?style=flat&labelColor=1f161e">
+</p>
 
-### Content Filtering
-- **XSS Detection**: Script tags, event handlers, javascript: URIs
-- **SQL Injection Detection**: UNION SELECT, tautologies, time-based injection
-- **Command Injection Detection**: Shell command chaining, backticks, $() substitution
-- **Custom Patterns**: User-defined regex patterns to block
+<p align="center">
+  <a href="https://registry.zentinelproxy.io/websocket-inspector/">Registry</a> &middot;
+  <a href="https://docs.zentinelproxy.io">Docs</a> &middot;
+  <a href="https://github.com/zentinelproxy">All repositories</a>
+</p>
 
-### Schema Validation
-- **JSON Schema**: Validate text frames as JSON against a provided schema
-- **MessagePack**: Decode and validate binary MessagePack messages
+For applications that carry user input over WebSocket, where request-phase
+inspection never sees the messages. The agent receives each frame in both
+directions, checks size and per-connection rate limits, matches text frames
+(and optionally binary frames) against built-in and custom regex patterns, and
+validates them against a JSON Schema or as MessagePack. A pattern or schema hit
+drops the frame; a size or rate-limit violation closes the connection.
+Inspection is per frame: fragmented messages are not reassembled, so a payload
+split across frames can evade the patterns.
 
-### Rate Limiting
-- Messages per second per connection
-- Bytes per second per connection
-- Burst allowance configuration
-
-### Size Limits
-- Maximum text frame size
-- Maximum binary frame size
-- Maximum total message size
-
-### Modes
-- **Block mode**: Drop or close connections on violations
-- **Detect-only mode**: Log detections without blocking
-- **Fail-open mode**: Allow frames on processing errors
-
-## Installation
-
-### Using Bundle (Recommended)
+## Quick start
 
 ```bash
-# Install just this agent
 zentinel bundle install websocket-inspector
-
-# Or install all bundled agents
-zentinel bundle install
+zentinel-websocket-inspector-agent --socket /var/run/zentinel/websocket-inspector.sock
 ```
 
-The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/) for details.
+```kdl
+system {
+    worker-threads 0
+}
 
-### Using Cargo
+listeners {
+    listener "http" {
+        address "127.0.0.1:8080"
+        protocol "http"
+    }
+}
 
-`zentinel-agent-websocket-inspector` is not published on crates.io, so `cargo install zentinel-agent-websocket-inspector` does not
-work. Install straight from the repository instead:
+agents {
+    agent "websocket-inspector" type="custom" {
+        unix-socket "/var/run/zentinel/websocket-inspector.sock"
+        events "websocket_frame"
+        timeout-ms 50
+        failure-mode "closed"
+    }
+}
+
+routes {
+    route "ws" {
+        matches {
+            path-prefix "/ws"
+        }
+        websocket #true
+        websocket-inspection #true
+        upstream "backend"
+    }
+}
+
+upstreams {
+    upstream "backend" {
+        target "127.0.0.1:3000"
+    }
+}
+```
+
+Frames reach the agent because the route sets both `websocket #true` and
+`websocket-inspection #true`, and the agent subscribes to `websocket_frame`; no
+filter is involved. For frames, the agent block's `failure-mode` decides what
+happens when the agent is unavailable (`"open"` forwards frames uninspected).
+The proxy skips frame inspection when the connection negotiates
+`permessage-deflate`.
+
+## Install
+
+**Bundle (recommended).** Downloads the release binary for your platform:
+
+```bash
+zentinel bundle install websocket-inspector
+```
+
+See [the bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/).
+
+**Cargo, from the repository.** The crate is not on crates.io; this builds the
+`zentinel-websocket-inspector-agent` binary from `main`:
 
 ```bash
 cargo install --git https://github.com/zentinelproxy/zentinel-agent-websocket-inspector
 ```
 
-This builds and installs the `zentinel-websocket-inspector-agent` binary.
-
-### Prebuilt Binaries
-
-Each [release](https://github.com/zentinelproxy/zentinel-agent-websocket-inspector/releases) ships binaries
-for `linux-x86_64`, `linux-aarch64`, and `darwin-aarch64`:
+**Release binaries.** Each [release](https://github.com/zentinelproxy/zentinel-agent-websocket-inspector/releases)
+ships `linux-x86_64`, `linux-aarch64` and `darwin-aarch64` archives:
 
 ```bash
 VERSION=0.4.0
@@ -70,7 +114,7 @@ tar -xzf zentinel-websocket-inspector-agent.tar.gz
 sudo install -m 0755 zentinel-websocket-inspector-agent /usr/local/bin/
 ```
 
-### From Source
+**From source.**
 
 ```bash
 git clone https://github.com/zentinelproxy/zentinel-agent-websocket-inspector
@@ -78,127 +122,115 @@ cd zentinel-agent-websocket-inspector
 cargo build --release
 ```
 
-## Usage
+## Configuration
+
+The agent is configured with flags or environment variables; an agent block's
+`config { }` in the proxy's KDL is not forwarded to the agent by the current
+proxy.
+
+Boolean flags take no value: `--fail-open` turns an option on. Options that
+default to on can only be turned off through their environment variable, for
+example `WS_BLOCK_MODE=false` for detect-only mode or `WS_CMD=false`
+(`--block-mode false` is rejected).
 
 ```bash
-# Basic usage with defaults (XSS, SQLi, command injection enabled)
-zentinel-websocket-inspector-agent --socket /tmp/zentinel-ws.sock
-
-# With rate limiting
+# Rate and size limits
 zentinel-websocket-inspector-agent \
-  --max-messages-per-sec 100 \
-  --max-bytes-per-sec 1048576 \
-  --rate-limit-burst 20
+  --socket /var/run/zentinel/websocket-inspector.sock \
+  --max-messages-per-sec 100 --max-bytes-per-sec 1048576 --rate-limit-burst 20 \
+  --max-text-frame-size 65536
 
-# With JSON Schema validation
-zentinel-websocket-inspector-agent --json-schema /path/to/schema.json
-
-# Detect-only mode (log but don't block)
-zentinel-websocket-inspector-agent --block-mode false
-
-# Enable verbose logging
-zentinel-websocket-inspector-agent -v
+# Detect-only, with JSON Schema validation
+WS_BLOCK_MODE=false zentinel-websocket-inspector-agent \
+  --socket /var/run/zentinel/websocket-inspector.sock \
+  --json-schema /etc/zentinel/ws-schema.json
 ```
 
-## CLI Options
+| Flag | Env | Default | Meaning |
+|---|---|---|---|
+| `--socket <PATH>` | `AGENT_SOCKET` | `/tmp/zentinel-ws.sock` | Unix socket to listen on |
+| `--grpc-address <ADDR>` | `WS_GRPC_ADDRESS` | none | Serve gRPC on this address instead of the socket |
+| `--xss-detection` | `WS_XSS` | on | XSS patterns |
+| `--sqli-detection` | `WS_SQLI` | on | SQL injection patterns |
+| `--command-injection` | `WS_CMD` | on | Command injection patterns |
+| `--custom-patterns <LIST>` | `WS_PATTERNS` | none | Comma-separated regexes to block |
+| `--json-schema <PATH>` | `WS_JSON_SCHEMA` | none | Validate text frames against this JSON Schema |
+| `--msgpack-validation` | `WS_MSGPACK` | off | Require binary frames to decode as MessagePack |
+| `--inspect-binary` | `WS_INSPECT_BINARY` | off | Also run patterns on binary frames |
+| `--max-messages-per-sec <N>` | `WS_RATE_MESSAGES` | `0` (off) | Frames per second per connection |
+| `--max-bytes-per-sec <N>` | `WS_RATE_BYTES` | `0` (off) | Bytes per second per connection |
+| `--rate-limit-burst <N>` | `WS_RATE_BURST` | `10` | Added to the per-second limits |
+| `--max-text-frame-size <N>` | `WS_MAX_TEXT` | `0` (off) | Largest text or continuation frame, bytes |
+| `--max-binary-frame-size <N>` | `WS_MAX_BINARY` | `0` (off) | Largest binary frame, bytes |
+| `--max-message-size <N>` | `WS_MAX_MESSAGE` | `0` | Accepted but not enforced (messages are not reassembled) |
+| `--block-mode` | `WS_BLOCK_MODE` | on | Off: log detections and forward the frame |
+| `--fail-open` | `WS_FAIL_OPEN` | off | Forward frames the agent cannot decode instead of dropping them |
+| `--log-frames` | `WS_LOG_FRAMES` | off | Log every frame |
+| `-v, --verbose` | `VERBOSE` | off | Debug logging |
 
-| Option | Env Var | Description | Default |
-|--------|---------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-ws.sock` |
-| `--xss-detection` | `WS_XSS` | Enable XSS detection | `true` |
-| `--sqli-detection` | `WS_SQLI` | Enable SQLi detection | `true` |
-| `--command-injection` | `WS_CMD` | Enable command injection detection | `true` |
-| `--custom-patterns` | `WS_PATTERNS` | Comma-separated regex patterns | - |
-| `--json-schema` | `WS_JSON_SCHEMA` | Path to JSON Schema file | - |
-| `--msgpack-validation` | `WS_MSGPACK` | Enable MessagePack validation | `false` |
-| `--max-messages-per-sec` | `WS_RATE_MESSAGES` | Rate limit (messages/sec, 0=unlimited) | `0` |
-| `--max-bytes-per-sec` | `WS_RATE_BYTES` | Rate limit (bytes/sec, 0=unlimited) | `0` |
-| `--rate-limit-burst` | `WS_RATE_BURST` | Burst allowance | `10` |
-| `--max-text-frame-size` | `WS_MAX_TEXT` | Max text frame size (bytes, 0=unlimited) | `0` |
-| `--max-binary-frame-size` | `WS_MAX_BINARY` | Max binary frame size (bytes, 0=unlimited) | `0` |
-| `--max-message-size` | `WS_MAX_MESSAGE` | Max message size (fragmented, 0=unlimited) | `0` |
-| `--block-mode` | `WS_BLOCK_MODE` | Block violations or detect-only | `true` |
-| `--fail-open` | `WS_FAIL_OPEN` | Allow on errors | `false` |
-| `--log-frames` | `WS_LOG_FRAMES` | Log all WebSocket frames | `false` |
-| `--inspect-binary` | `WS_INSPECT_BINARY` | Inspect binary frames | `false` |
-| `-v, --verbose` | `VERBOSE` | Enable debug logging | `false` |
+Proxy-side options (`events`, `timeout-ms`, `failure-mode`):
+<https://docs.zentinelproxy.io/configuration/agents/>. Agent reference:
+<https://registry.zentinelproxy.io/websocket-inspector/>.
 
-## Detection Patterns
+## How it works
 
-### XSS Patterns
-- `<script>`, `</script>` - Script tags
-- `on*=` - Event handlers (onclick, onerror, etc.)
-- `javascript:` - JavaScript URIs
-- `data:text/html` - Data URIs with HTML
-- `<iframe>`, `<object>`, `<embed>` - Embedded content
+For each frame, in order:
 
-### SQL Injection Patterns
-- `UNION SELECT` - Union-based injection
-- `OR 1=1`, `' OR '` - Tautology attacks
-- `--`, `/* */`, `#` - Comment injection
-- `SLEEP()`, `BENCHMARK()`, `WAITFOR DELAY` - Time-based injection
-- `INFORMATION_SCHEMA` - Schema enumeration
+1. Size limit by opcode. Exceeded: close with `1009` (Message Too Big), tag `ws-size-limit`.
+2. Rate limit per connection, over a one-second window, counting frames in both
+   directions. Exceeded: close with `1008` (Policy Violation), tag `ws-rate-limit`.
+3. Control frames (close, ping, pong) are allowed.
+4. Text and continuation frames are matched against the enabled patterns and
+   the JSON Schema; binary frames against the patterns (with
+   `--inspect-binary`) and MessagePack. A hit drops the frame, tagged
+   `ws-xss`, `ws-sqli`, `ws-cmd-injection`, `ws-custom-pattern` or
+   `ws-schema-invalid`.
 
-### Command Injection Patterns
-- `; cmd`, `| cmd` - Command chaining
-- `` `cmd` `` - Backtick execution
-- `$(cmd)` - Dollar-paren execution
-- `cat /etc/`, `rm -rf` - Dangerous commands
-- `/bin/sh -i` - Reverse shell patterns
+In detect-only mode the same tags are logged with `detect-only` and the frame
+is forwarded.
 
-## WebSocket Close Codes
+Built-in patterns:
 
-When blocking, the agent uses RFC 6455 close codes:
+- **XSS:** `<script`, `</script`, `on…=` event handlers, `javascript:`,
+  `vbscript:`, `data:text/html`, CSS `expression(`, `<svg … onload=`,
+  `<iframe`, `<object` / `<embed`.
+- **SQL injection:** `UNION [ALL] SELECT`, `OR 1=1`, `' OR '`, `AND 1=1`,
+  trailing `--` or `#`, `/* … */`, `SLEEP(`, `BENCHMARK(`, `WAITFOR DELAY`,
+  `; DROP|DELETE|UPDATE|…`, `INFORMATION_SCHEMA`, `0x…` hex literals.
+- **Command injection:** `;`, `|`, `&&` or `||` followed by a word, backticks,
+  `$(…)`, reads of `/etc/`, `rm -r`/`-f`, `wget`/`curl http`, `nc -…`,
+  `/bin/sh -i|-c`, `/dev/tcp/` redirects.
 
-| Code | Meaning | Use Case |
-|------|---------|----------|
-| 1008 | Policy Violation | Security violation (content filtering, rate limit) |
-| 1009 | Message Too Big | Frame exceeds size limit |
+The command-injection and hex patterns are broad: any free text containing
+`; word` or `| word` is dropped while they are on, so test against your real
+traffic, or start in detect-only mode.
 
-## Audit Tags
-
-Detections are logged with audit tags:
-- `ws-xss` - XSS detection
-- `ws-sqli` - SQL injection detection
-- `ws-cmd-injection` - Command injection detection
-- `ws-custom-pattern` - Custom pattern match
-- `ws-schema-invalid` - JSON/MessagePack schema validation failure
-- `ws-size-limit` - Frame size limit exceeded
-- `ws-rate-limit` - Rate limit exceeded
-- `detect-only` - Added when in detect-only mode
-
-## Integration with Zentinel
-
-Configure the agent in your Zentinel proxy configuration:
-
-```kdl
-agents {
-    agent "websocket-inspector" {
-        type "custom"
-        unix-socket "/tmp/zentinel-ws.sock"
-        events "websocket_frame"
-        timeout-ms 50
-        failure-mode "open"
-    }
-}
-```
+The agent reports frame, block, drop, rate-limit and byte counters as v2
+metrics.
 
 ## Development
 
 ```bash
-# Run tests
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
 cargo test
-
-# Run integration tests only
-cargo test --test integration
-
-# Check formatting
-cargo fmt --check
-
-# Run linter
-cargo clippy
+cargo test --test integration   # integration tests only
 ```
+
+## Related
+
+- [Registry page](https://registry.zentinelproxy.io/websocket-inspector/)
+- [Agents configuration](https://docs.zentinelproxy.io/configuration/agents/)
+- [Agent protocol v2](https://docs.zentinelproxy.io/agents/v2/)
+- [Zentinel](https://github.com/zentinelproxy/zentinel)
+- [MQTT gateway agent](https://github.com/zentinelproxy/zentinel-agent-mqtt-gateway), for MQTT over WebSocket
 
 ## License
 
-Apache-2.0
+Apache-2.0, see [`LICENSE`](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Part of <a href="https://zentinelproxy.io">Zentinel</a>, the security-first reverse proxy. The shisa guards the gate.</sub>
+</p>
