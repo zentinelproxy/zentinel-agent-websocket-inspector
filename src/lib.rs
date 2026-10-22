@@ -8,6 +8,7 @@
 //! - Size limits
 
 pub mod config;
+pub mod fingerprint;
 pub mod inspection;
 pub mod ratelimit;
 pub mod validation;
@@ -15,8 +16,10 @@ pub mod validation;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use config::WsInspectorConfig;
+use fingerprint::config_fingerprint;
 use inspection::{ContentInspector, Detection};
 use ratelimit::{RateLimitConfig, RateLimitExceeded, RateLimiter};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -38,8 +41,12 @@ use serde::Deserialize;
 
 /// JSON configuration structure for on_configure().
 /// Maps kebab-case JSON keys to WsInspectorConfig fields.
+///
+/// Every field is optional: a key that is absent keeps the value the agent is
+/// currently running with (its flags, or an earlier configure). Unknown keys
+/// are rejected so that a misspelled setting cannot silently fall back.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct WsInspectorConfigJson {
     /// Enable XSS detection in text frames
     pub xss_detection: Option<bool>,
@@ -47,6 +54,11 @@ pub struct WsInspectorConfigJson {
     pub sqli_detection: Option<bool>,
     /// Enable command injection detection in text frames
     pub command_injection: Option<bool>,
+    /// Custom regex patterns to block. A single string (one pattern, which is
+    /// what a one-argument KDL node becomes) or a list.
+    pub custom_patterns: Option<StringOrList>,
+    /// Path to a JSON Schema file for message validation
+    pub json_schema: Option<PathBuf>,
     /// Block mode: true = block violations, false = detect-only
     pub block_mode: Option<bool>,
     /// Fail open: allow frames on processing errors
@@ -55,6 +67,8 @@ pub struct WsInspectorConfigJson {
     pub max_text_frame_size: Option<usize>,
     /// Maximum binary frame size in bytes (0 = unlimited)
     pub max_binary_frame_size: Option<usize>,
+    /// Maximum total message size (0 = unlimited)
+    pub max_message_size: Option<usize>,
     /// Maximum messages per second per connection (0 = unlimited)
     pub max_messages_per_sec: Option<u32>,
     /// Maximum bytes per second per connection (0 = unlimited)
@@ -63,51 +77,132 @@ pub struct WsInspectorConfigJson {
     pub rate_limit_burst: Option<u32>,
     /// Log all frames for debugging
     pub log_frames: Option<bool>,
+    /// Inspect binary frames as well as text frames
+    pub inspect_binary: Option<bool>,
     /// Enable MessagePack message decoding and validation
     pub msgpack_validation: Option<bool>,
+}
+
+/// A list setting that may arrive as one string or as an array of strings.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum StringOrList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringOrList {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            StringOrList::One(s) => vec![s],
+            StringOrList::Many(v) => v,
+        }
+    }
 }
 
 impl WsInspectorConfigJson {
     /// Apply JSON config values to an existing WsInspectorConfig.
     /// Only overrides fields that are explicitly set (Some).
-    pub fn apply_to(&self, config: &mut WsInspectorConfig) {
+    ///
+    /// Fails, leaving `config` untouched, when a value cannot be used: an
+    /// invalid custom pattern, or a non-empty pattern list that is empty once
+    /// blank entries are dropped.
+    pub fn apply_to(&self, config: &mut WsInspectorConfig) -> anyhow::Result<()> {
+        let mut next = config.clone();
         if let Some(v) = self.xss_detection {
-            config.xss_detection = v;
+            next.xss_detection = v;
         }
         if let Some(v) = self.sqli_detection {
-            config.sqli_detection = v;
+            next.sqli_detection = v;
         }
         if let Some(v) = self.command_injection {
-            config.command_injection = v;
+            next.command_injection = v;
+        }
+        if let Some(ref v) = self.custom_patterns {
+            let raw = v.clone().into_vec();
+            let patterns: Vec<String> = raw
+                .iter()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            if patterns.is_empty() && !raw.is_empty() {
+                anyhow::bail!("custom-patterns contains only empty entries");
+            }
+            for (i, pattern) in patterns.iter().enumerate() {
+                if let Err(e) = regex::Regex::new(pattern) {
+                    anyhow::bail!("custom-patterns[{i}] is not a valid regex: {e}");
+                }
+            }
+            next.custom_patterns = patterns;
+        }
+        if let Some(ref v) = self.json_schema {
+            next.json_schema = Some(v.clone());
         }
         if let Some(v) = self.block_mode {
-            config.block_mode = v;
+            next.block_mode = v;
         }
         if let Some(v) = self.fail_open {
-            config.fail_open = v;
+            next.fail_open = v;
         }
         if let Some(v) = self.max_text_frame_size {
-            config.max_text_frame_size = v;
+            next.max_text_frame_size = v;
         }
         if let Some(v) = self.max_binary_frame_size {
-            config.max_binary_frame_size = v;
+            next.max_binary_frame_size = v;
+        }
+        if let Some(v) = self.max_message_size {
+            next.max_message_size = v;
         }
         if let Some(v) = self.max_messages_per_sec {
-            config.max_messages_per_sec = v;
+            next.max_messages_per_sec = v;
         }
         if let Some(v) = self.max_bytes_per_sec {
-            config.max_bytes_per_sec = v;
+            next.max_bytes_per_sec = v;
         }
         if let Some(v) = self.rate_limit_burst {
-            config.rate_limit_burst = v;
+            next.rate_limit_burst = v;
         }
         if let Some(v) = self.log_frames {
-            config.log_frames = v;
+            next.log_frames = v;
+        }
+        if let Some(v) = self.inspect_binary {
+            next.inspect_binary = v;
         }
         if let Some(v) = self.msgpack_validation {
-            config.msgpack_validation = v;
+            next.msgpack_validation = v;
         }
+        *config = next;
+        Ok(())
     }
+}
+
+/// Names of the settings that differ between `old` and `new`.
+fn changed_settings(old: &WsInspectorConfig, new: &WsInspectorConfig) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    macro_rules! cmp {
+        ($($field:ident => $name:literal),* $(,)?) => {
+            $(if old.$field != new.$field { changed.push($name); })*
+        };
+    }
+    cmp!(
+        xss_detection => "xss-detection",
+        sqli_detection => "sqli-detection",
+        command_injection => "command-injection",
+        custom_patterns => "custom-patterns",
+        json_schema => "json-schema",
+        msgpack_validation => "msgpack-validation",
+        max_messages_per_sec => "max-messages-per-sec",
+        max_bytes_per_sec => "max-bytes-per-sec",
+        rate_limit_burst => "rate-limit-burst",
+        max_text_frame_size => "max-text-frame-size",
+        max_binary_frame_size => "max-binary-frame-size",
+        max_message_size => "max-message-size",
+        block_mode => "block-mode",
+        fail_open => "fail-open",
+        log_frames => "log-frames",
+        inspect_binary => "inspect-binary",
+    );
+    changed
 }
 
 /// WebSocket opcode string values
@@ -133,6 +228,8 @@ struct InspectorState {
     json_validator: Option<JsonSchemaValidator>,
     msgpack_validator: Option<MsgpackValidator>,
     rate_limiter: RateLimiter,
+    /// Canonical hash of the last configuration accepted from the proxy.
+    config_hash: Option<u64>,
 }
 
 /// WebSocket Inspector Agent.
@@ -206,48 +303,78 @@ impl WsInspectorAgent {
             json_validator,
             msgpack_validator,
             rate_limiter,
+            config_hash: None,
         })
     }
 
-    /// Reconfigure the agent with new settings.
-    /// Only updates fields that are explicitly set in the JSON config.
-    async fn reconfigure(&self, json_config: WsInspectorConfigJson) -> anyhow::Result<()> {
+    /// Reconfigure the agent with a configuration received from the proxy.
+    ///
+    /// The proxy sends the same `config { }` block on every connection, so
+    /// this must be idempotent: an identical document (by canonical hash) or
+    /// one that leaves the effective settings unchanged does nothing. When
+    /// settings do change, only the parts they affect are rebuilt, and the
+    /// rate limiter keeps its per-connection counters.
+    ///
+    /// Returns the names of the settings that changed. On error nothing is
+    /// changed.
+    async fn reconfigure(&self, raw: serde_json::Value) -> anyhow::Result<Vec<&'static str>> {
+        let hash = config_fingerprint(&raw);
         let mut state = self.state.write().await;
-
-        // Apply new config values
-        json_config.apply_to(&mut state.config);
-
-        // Rebuild content inspector with updated config
-        state.content_inspector = ContentInspector::new(state.config.clone());
-
-        // Rebuild MessagePack validator if setting changed
-        if json_config.msgpack_validation.is_some() {
-            state.msgpack_validator = if state.config.msgpack_validation {
-                Some(if let Some(ref jv) = state.json_validator {
-                    MsgpackValidator::with_schema(jv.clone())
-                } else {
-                    MsgpackValidator::new()
-                })
-            } else {
-                None
-            };
+        if state.config_hash == Some(hash) {
+            return Ok(Vec::new());
         }
 
-        // Rebuild rate limiter if any rate limit settings changed
-        if json_config.max_messages_per_sec.is_some()
-            || json_config.max_bytes_per_sec.is_some()
-            || json_config.rate_limit_burst.is_some()
-        {
-            state.rate_limiter = RateLimiter::new(RateLimitConfig {
-                max_messages_per_sec: state.config.max_messages_per_sec,
-                max_bytes_per_sec: state.config.max_bytes_per_sec,
-                burst: state.config.rate_limit_burst,
+        let json_config: WsInspectorConfigJson = serde_json::from_value(raw)
+            .map_err(|e| anyhow::anyhow!("invalid configuration: {e}"))?;
+        let mut next = state.config.clone();
+        json_config.apply_to(&mut next)?;
+        let changed = changed_settings(&state.config, &next);
+        if changed.is_empty() {
+            state.config_hash = Some(hash);
+            return Ok(changed);
+        }
+
+        // Build everything that can fail before touching the running state.
+        let json_validator = if next.json_schema != state.config.json_schema {
+            match next.json_schema {
+                Some(ref path) => Some(JsonSchemaValidator::from_file(path)?),
+                None => None,
+            }
+        } else {
+            state.json_validator.clone()
+        };
+
+        state.msgpack_validator = if next.msgpack_validation {
+            Some(if let Some(ref jv) = json_validator {
+                MsgpackValidator::with_schema(jv.clone())
+            } else {
+                MsgpackValidator::new()
+            })
+        } else {
+            None
+        };
+        state.json_validator = json_validator;
+        state.content_inspector = ContentInspector::new(next.clone());
+
+        if changed.iter().any(|c| {
+            matches!(
+                *c,
+                "max-messages-per-sec" | "max-bytes-per-sec" | "rate-limit-burst"
+            )
+        }) {
+            // New limits, same counters: a reconfigure must not hand every
+            // connection a fresh window.
+            state.rate_limiter = state.rate_limiter.with_config(RateLimitConfig {
+                max_messages_per_sec: next.max_messages_per_sec,
+                max_bytes_per_sec: next.max_bytes_per_sec,
+                burst: next.rate_limit_burst,
                 ..Default::default()
             });
         }
 
-        info!("Agent reconfigured successfully");
-        Ok(())
+        state.config = next;
+        state.config_hash = Some(hash);
+        Ok(changed)
     }
 
     /// Check if agent is draining.
@@ -639,28 +766,36 @@ impl AgentHandlerV2 for WsInspectorAgent {
     }
 
     /// Handle configuration updates from proxy.
+    ///
+    /// Called once per proxy connection with the agent's `config { }` block.
+    /// The configuration itself is never logged (it may hold secrets); its
+    /// hash and the names of the changed settings are.
     async fn on_configure(&self, config: serde_json::Value, version: Option<String>) -> bool {
-        info!(
-            config_version = ?version,
-            "Received configuration update"
-        );
-
-        // Parse the JSON config
-        let json_config: WsInspectorConfigJson = match serde_json::from_value(config) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "Failed to parse configuration");
-                return false;
+        let hash = format!("{:016x}", config_fingerprint(&config));
+        match self.reconfigure(config).await {
+            Ok(changed) if changed.is_empty() => {
+                debug!(config_version = ?version, config_hash = %hash, "Configuration unchanged");
+                true
             }
-        };
-
-        // Apply the configuration
-        if let Err(e) = self.reconfigure(json_config).await {
-            warn!(error = %e, "Failed to apply configuration");
-            return false;
+            Ok(changed) => {
+                info!(
+                    config_version = ?version,
+                    config_hash = %hash,
+                    changed = ?changed,
+                    "Configuration applied"
+                );
+                true
+            }
+            Err(e) => {
+                warn!(
+                    config_version = ?version,
+                    config_hash = %hash,
+                    error = %e,
+                    "Configuration rejected"
+                );
+                false
+            }
         }
-
-        true
     }
 
     /// Handle shutdown request.
@@ -916,6 +1051,131 @@ mod tests {
 
         // Should return false on invalid config
         assert!(!result);
+    }
+
+    /// Rate-limit decision for one frame on the test connection.
+    async fn send_one(agent: &WsInspectorAgent) -> Option<WebSocketDecision> {
+        let event = make_text_frame("hello", true);
+        AgentHandlerV2::on_websocket_frame(agent, event)
+            .await
+            .websocket_decision
+    }
+
+    fn limited_agent() -> WsInspectorAgent {
+        // 3 messages/s + burst 0: the 4th frame within a second is closed.
+        WsInspectorAgent::new(WsInspectorConfig {
+            max_messages_per_sec: 3,
+            rate_limit_burst: 0,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn is_allowed(d: &Option<WebSocketDecision>) -> bool {
+        matches!(d, Some(WebSocketDecision::Allow))
+    }
+
+    #[tokio::test]
+    async fn test_identical_configure_keeps_rate_limit_counters() {
+        let agent = limited_agent();
+        let block = serde_json::json!({
+            "max-messages-per-sec": 3,
+            "rate-limit-burst": 0,
+            "xss-detection": true
+        });
+        assert!(AgentHandlerV2::on_configure(&agent, block.clone(), None).await);
+        for _ in 0..3 {
+            assert!(is_allowed(&send_one(&agent).await));
+        }
+        // The proxy opens another pooled connection (or reconnects) and sends
+        // the same block again: the connection at its limit must stay there.
+        assert!(AgentHandlerV2::on_configure(&agent, block.clone(), None).await);
+        // Same settings, different key order: still a no-op.
+        let reordered = serde_json::json!({
+            "xss-detection": true,
+            "rate-limit-burst": 0,
+            "max-messages-per-sec": 3
+        });
+        assert!(AgentHandlerV2::on_configure(&agent, reordered, None).await);
+        assert!(!is_allowed(&send_one(&agent).await));
+    }
+
+    #[tokio::test]
+    async fn test_changed_limits_keep_rate_limit_counters() {
+        let agent = limited_agent();
+        for _ in 0..3 {
+            assert!(is_allowed(&send_one(&agent).await));
+        }
+        // Raising the limit by one allows exactly one more frame this window.
+        let block = serde_json::json!({ "max-messages-per-sec": 4 });
+        assert!(AgentHandlerV2::on_configure(&agent, block, None).await);
+        assert!(is_allowed(&send_one(&agent).await));
+        assert!(!is_allowed(&send_one(&agent).await));
+    }
+
+    #[tokio::test]
+    async fn test_partial_configure_keeps_cli_values() {
+        let agent = WsInspectorAgent::new(WsInspectorConfig {
+            max_messages_per_sec: 50,
+            max_text_frame_size: 1024,
+            custom_patterns: vec!["secret".to_string()],
+            block_mode: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            AgentHandlerV2::on_configure(&agent, serde_json::json!({"log-frames": true}), None)
+                .await
+        );
+        let state = agent.state.read().await;
+        assert_eq!(state.config.max_messages_per_sec, 50);
+        assert_eq!(state.config.max_text_frame_size, 1024);
+        assert_eq!(state.config.custom_patterns, vec!["secret".to_string()]);
+        assert!(!state.config.block_mode);
+        assert!(state.config.log_frames);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_key_rejected_and_nothing_changes() {
+        let agent = WsInspectorAgent::new(WsInspectorConfig {
+            max_messages_per_sec: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        // A misspelling of max-messages-per-sec next to a valid key.
+        let block = serde_json::json!({
+            "max-message-per-sec": 1,
+            "block-mode": false
+        });
+        assert!(!AgentHandlerV2::on_configure(&agent, block, None).await);
+        let state = agent.state.read().await;
+        assert_eq!(state.config.max_messages_per_sec, 50);
+        assert!(state.config.block_mode);
+    }
+
+    #[tokio::test]
+    async fn test_custom_patterns_from_kdl_shapes() {
+        let agent = WsInspectorAgent::new(WsInspectorConfig::default()).unwrap();
+        // One argument in KDL arrives as a string.
+        let one = serde_json::json!({"custom-patterns": "password=\\w+"});
+        assert!(AgentHandlerV2::on_configure(&agent, one, None).await);
+        let event = make_text_frame("password=hunter2", true);
+        let response = AgentHandlerV2::on_websocket_frame(&agent, event).await;
+        assert!(!is_allowed(&response.websocket_decision));
+
+        let many = serde_json::json!({"custom-patterns": ["a+b", "c+d"]});
+        assert!(AgentHandlerV2::on_configure(&agent, many, None).await);
+        assert_eq!(agent.state.read().await.config.custom_patterns.len(), 2);
+
+        // A list that is empty after parsing, and an invalid regex, are
+        // rejected rather than replacing the active patterns.
+        for bad in [
+            serde_json::json!({"custom-patterns": ["", "  "]}),
+            serde_json::json!({"custom-patterns": "(unclosed"}),
+        ] {
+            assert!(!AgentHandlerV2::on_configure(&agent, bad, None).await);
+            assert_eq!(agent.state.read().await.config.custom_patterns.len(), 2);
+        }
     }
 
     #[test]
