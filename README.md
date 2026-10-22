@@ -183,8 +183,8 @@ WS_BLOCK_MODE=false zentinel-websocket-inspector-agent \
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
-| `--socket <PATH>` | `AGENT_SOCKET` | `/tmp/zentinel-ws.sock` | Unix socket to listen on |
-| `--grpc-address <ADDR>` | `WS_GRPC_ADDRESS` | none | Serve gRPC on this address instead of the socket |
+| `--socket <PATH>` | `AGENT_SOCKET` | `/tmp/zentinel-ws.sock` | Unix socket to listen on (agent protocol v2) |
+| `--grpc-address <ADDR>` | `WS_GRPC_ADDRESS` | none | Serve gRPC (agent protocol v2) on this address instead of the socket |
 | `--xss-detection` | `WS_XSS` | on | XSS patterns |
 | `--sqli-detection` | `WS_SQLI` | on | SQL injection patterns |
 | `--command-injection` | `WS_CMD` | on | Command injection patterns |
@@ -202,6 +202,7 @@ WS_BLOCK_MODE=false zentinel-websocket-inspector-agent \
 | `--fail-open` | `WS_FAIL_OPEN` | off | Forward frames the agent cannot decode instead of dropping them |
 | `--log-frames` | `WS_LOG_FRAMES` | off | Log every frame |
 | `-v, --verbose` | `VERBOSE` | off | Debug logging |
+| `--version` | | | Print `zentinel-websocket-inspector-agent <version>` and exit |
 
 Proxy-side options (`events`, `timeout-ms`, `failure-mode`):
 <https://docs.zentinelproxy.io/configuration/agents/>. Agent reference:
@@ -242,6 +243,23 @@ traffic, or start in detect-only mode.
 
 The agent reports frame, block, drop, rate-limit and byte counters as v2
 metrics.
+
+## Releases and smoke test
+
+Releases are built from their tag by the shared pipeline in
+[`zentinelproxy/.github`](https://github.com/zentinelproxy/.github)
+(`agent-release.yml`): each platform's binary is run behind a real Zentinel
+by [`scripts/smoke-test.sh`](scripts/smoke-test.sh) before anything is
+published, and CI runs the same smoke job on every push. Over the Unix socket
+and over gRPC, fail-closed, it checks the v2 handshake, that plain HTTP
+requests are forwarded, and that with the agent stopped requests are
+refused. The harness speaks plain HTTP only, so the frame checks are covered by
+`cargo test`, not by the smoke test. Locally:
+
+```bash
+AGENT_SMOKE=../.github/agent-smoke/smoke.py \
+  scripts/smoke-test.sh target/release/zentinel-websocket-inspector-agent ./zentinel
+```
 
 ## Development
 
