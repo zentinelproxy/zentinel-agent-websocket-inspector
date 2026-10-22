@@ -13,7 +13,7 @@ use zentinel_agent_websocket_inspector::{config::WsInspectorConfig, WsInspectorA
 /// Provides security controls for WebSocket traffic including content filtering,
 /// schema validation, rate limiting, and size limits.
 #[derive(Parser, Debug)]
-#[command(name = "zentinel-ws-agent")]
+#[command(name = "zentinel-websocket-inspector-agent")]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Unix socket path for agent communication (UDS transport)
