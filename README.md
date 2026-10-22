@@ -124,9 +124,44 @@ cargo build --release
 
 ## Configuration
 
-The agent is configured with flags or environment variables; an agent block's
-`config { }` in the proxy's KDL is not forwarded to the agent by the current
-proxy.
+The agent is configured with flags or environment variables, and, from the
+Zentinel release that includes zentinelproxy/zentinel#603, by the agent
+block's `config { }` in the proxy's KDL. The proxy sends that block on every
+connection it opens to the agent (each pooled connection at startup and every
+reconnect), so the agent applies it under one rule:
+
+- **Idempotent.** A block identical to the active one (same canonical hash,
+  key order ignored), or one that leaves every setting as it is, changes
+  nothing: rate-limit counters and validators are kept. When settings do
+  change, only the affected parts are rebuilt, and the per-connection
+  rate-limit counters carry over to the new limits.
+- **Merge, don't replace.** Keys in the block override the flags; keys that
+  are absent keep their current value.
+- **Reject what can't be applied.** An unknown or misspelled key, an invalid
+  `custom-patterns` regex, a `custom-patterns` list that is empty once blank
+  entries are dropped, or an unreadable `json-schema` file makes the agent
+  refuse the configuration (the proxy then does not use that connection) and
+  keep running with what it had.
+- **No secrets in logs.** The agent logs the block's hash and the names of
+  the settings that changed, never the block itself.
+
+Block keys are the flag names without `--`: `xss-detection`,
+`sqli-detection`, `command-injection`, `custom-patterns` (one string or a
+list), `json-schema`, `msgpack-validation`, `inspect-binary`,
+`max-messages-per-sec`, `max-bytes-per-sec`, `rate-limit-burst`,
+`max-text-frame-size`, `max-binary-frame-size`, `max-message-size`,
+`block-mode`, `fail-open`, `log-frames`.
+
+```kdl
+agent "websocket-inspector" type="custom" {
+    unix-socket "/var/run/zentinel/websocket-inspector.sock"
+    events "websocket_frame"
+    config {
+        max-messages-per-sec 100
+        custom-patterns "password=\\w+" "api[_-]?key"
+    }
+}
+```
 
 Boolean flags take no value: `--fail-open` turns an option on. Options that
 default to on can only be turned off through their environment variable, for

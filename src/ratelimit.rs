@@ -127,6 +127,16 @@ impl RateLimiter {
         }
     }
 
+    /// A limiter with new limits that shares this one's per-connection
+    /// counters, so changing the limits does not start every connection on a
+    /// fresh window.
+    pub fn with_config(&self, config: RateLimitConfig) -> Self {
+        Self {
+            config,
+            state: Arc::clone(&self.state),
+        }
+    }
+
     /// Check if a message is allowed and record it.
     pub async fn check_and_record(
         &self,

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 /// Configuration for the WebSocket Inspector agent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WsInspectorConfig {
     // Content filtering (all default: true)
     /// Enable XSS detection in text frames
